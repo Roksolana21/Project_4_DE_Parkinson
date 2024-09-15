@@ -1,0 +1,858 @@
+---
+title: "Project"
+author: "Group 4"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+#Libraries
+```{r include = FALSE}
+### Bioconductor and CRAN libraries used
+library(tidyverse)
+library(readr)
+library(tidyr)
+library(stringr)
+#install.packages("BiocManager")
+#BiocManager::install("AnnotationHub")
+#BiocManager::install("GEOquery")
+library(AnnotationHub) # bioc
+library(ensembldb) # bioc
+library(RColorBrewer)
+
+library(DESeq2) # bioc
+library(pheatmap) # R
+library(DEGreport) # bioc
+library(tximport) # bioc
+library(ggplot2) 
+library(ggrepel) #r
+library(knitr)
+library(GEOquery)
+library(Biobase)
+
+library(biomaRt)
+
+library(ggplotify)#r
+library(writexl) #r
+
+library(clusterProfiler) #bioc
+library(org.Mm.eg.db) # bioc
+
+#install.packages("data.table")
+#install.packages("R.utils")
+library(data.table)
+library(R.utils)
+library (apeglm)
+library(enrichR)
+library(gprofiler2)
+library(stats)
+library(enrichplot)
+library(europepmc)
+
+ggplot2::theme_set(theme_light(base_size = 14))
+
+opts_chunk[["set"]](
+    cache = FALSE,
+    dev = c("png", "pdf"),
+    error = TRUE,
+    highlight = TRUE,
+    message = FALSE,
+    prompt = FALSE,
+    tidy = FALSE,
+    warning = FALSE)
+
+```
+
+\newpage
+
+# Counts file combination
+```{r}
+directory <- "D:/Бiоiнформатика/DAAD/Project_group_4/First_try/GSE241437_RAW"
+
+
+file_paths <- c(
+  file.path(directory, "GSM7728944_transplanted_Control1.tab.txt.gz"),
+  file.path(directory, "GSM7728945_transplanted_Control2.tab.txt.gz"),
+  file.path(directory, "GSM7728946_transplanted_Control3.tab.txt.gz"),
+  file.path(directory, "GSM7728947_transplanted_PD1.tab.txt.gz"),
+  file.path(directory, "GSM7728948_transplanted_PD2.tab.txt.gz"),
+  file.path(directory, "GSM7728949_transplanted_PD3.tab.txt.gz"),
+  file.path(directory, "GSM7728938_in_vitro_Control1.tab.txt.gz"),
+  file.path(directory, "GSM7728939_in_vitro_Control2.tab.txt.gz"),
+  file.path(directory, "GSM7728940_in_vitro_Control3.tab.txt.gz"),
+  file.path(directory, "GSM7728941_in_vitro_PD1.tab.txt.gz"),
+  file.path(directory, "GSM7728942_in_vitro_PD2.tab.txt.gz"),
+  file.path(directory, "GSM7728943_in_vitro_PD3.tab.txt.gz")
+)
+
+read_gz_file <- function(file_path) {
+  df <- read.table(gzfile(file_path), header = TRUE, sep = "\t", quote = "", stringsAsFactors = FALSE)
+  df
+}
+
+counts_list <- lapply(file_paths, read_gz_file)
+
+counts_list <- lapply(counts_list, function(df) {
+  if (names(df)[1] != "gene_id") {
+    df <- df %>%
+      rename(gene_id = 1)
+  }
+  df
+})
+
+raw_counts <- counts_list[[1]]
+for (df in counts_list[-1]) {
+ raw_counts <- raw_counts %>%
+    full_join(df, by = "gene_id")
+}
+
+output_way <- getwd()
+
+#save as csv
+output_file <- file.path(output_way, "raw_counts.csv")
+fwrite(raw_counts, output_file)
+```
+
+\newpage
+ 
+# Protein_coding_genes
+
+```{r}
+ensembl_mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+ensembl_human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+protein_coding_genes_mouse <- getBM(
+  attributes = c("ensembl_gene_id", "gene_biotype"),
+  filters = "biotype",
+  values = "protein_coding",
+  mart = ensembl_mouse
+)
+
+protein_coding_genes_human <- getBM(
+  attributes = c("ensembl_gene_id", "gene_biotype"),
+  filters = "biotype",
+  values = "protein_coding",
+  mart = ensembl_human
+)
+
+protein_coding_genes <- bind_rows(protein_coding_genes_mouse, protein_coding_genes_human) %>%
+  dplyr::select(ensembl_gene_id)
+
+output_file <- file.path(output_way, "protein_coding_genes.csv")
+write_csv(protein_coding_genes, output_file)
+```
+
+\newpage
+
+
+# Counts loading
+
+```{r}
+colnames(raw_counts)[colnames(raw_counts) == "gene_id"] <- "ensembl_gene_id"
+
+merged_counts <- inner_join(raw_counts, protein_coding_genes, by = "ensembl_gene_id")
+
+colnames(merged_counts) <- c("gene_id", "transplanted.Control1", "transplanted.Control2", "transplanted.Control3", "transplanted.PD1", "transplanted.PD2", "transplanted.PD3", "in.vitro.Control1", "in.vitro.Control2", "in.vitro.Control3", "in.vitro.PD1", "in.vitro.PD2", "in.vitro.PD3")
+
+
+output_file <- file.path(output_way, "merged_counts.csv")
+write.csv(merged_counts, output_file)
+```
+
+# Gene names
+```{r}
+
+colnames(merged_counts)[1] <- "ensembl_gene_id"
+
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+gene_info <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"), 
+                    filters = "ensembl_gene_id", 
+                    values = merged_counts$ensembl_gene_id, 
+                    mart = mart)
+output_file <- file.path(output_way, "gene_info.csv")
+write.csv(gene_info, output_file)
+
+```
+
+
+\newpage
+
+# Metadata
+```{r}
+metadata_raw <- read_tsv(file.path(output_way, "GSE241437_series_matrix.txt"), skip=26)
+
+transposed_metadata <- t(metadata_raw)
+metadata_raw <- as.data.frame(transposed_metadata)
+colnames(metadata_raw) <- metadata_raw[1, ]
+metadata_raw <-metadata_raw [-1, ]
+
+metadata <- metadata_raw[, c(1, which(names(metadata_raw) %in% c('!Sample_geo_accession
+', '!Sample_source_name_ch1', '!Sample_characteristics_ch1', '!Sample_characteristics_ch1')))]
+
+names(metadata) <- c("Sample_geo_accession", "Sample_source_name", "delet", "geno_type", "location")
+metadata <- metadata %>% select(-delet)
+
+metadata$Sample_source_name <- c("Cell_1", "Cell_2", "Cell_3","Cell_1", "Cell_2", "Cell_3")
+
+rownames(metadata) <-c("in.vitro.Control1", "in.vitro.Control2", "in.vitro.Control3", "in.vitro.PD1", "in.vitro.PD2", "in.vitro.PD3", "transplanted.Control1", "transplanted.Control2", "transplanted.Control3", "transplanted.PD1", "transplanted.PD2", "transplanted.PD3") 
+
+metadata <- metadata[colnames(merged_counts), ]
+metadata <- metadata[-1,]
+
+output_file <- file.path(output_way, "metadata.csv")
+write.csv(metadata, output_file)
+```
+\newpage
+
+#Gene normalisation
+```{r}
+
+gene_length <- read_tsv("mart_export.txt")
+
+counts <- merged_counts  %>% arrange(ensembl_gene_id)
+
+gene_ids <- intersect(counts$ensembl_gene_id, gene_length$ensembl_gene_id)
+v_len <- gene_length %>% dplyr::filter(ensembl_gene_id %in% gene_ids)
+
+counts <- counts %>% column_to_rownames("ensembl_gene_id")
+x <- counts / v_len$Length
+counts_tpm <- t(t(x) * 1e6 / colSums(x)) %>% as.data.frame() %>% round(2) %>%
+  rownames_to_column("ensembl_gene_id")
+
+output_file <- file.path(output_way, "counts_tpm.csv")
+write.csv(counts_tpm, output_file)
+
+```
+
+\newpage
+
+# DESeq2
+```{r}
+dds_file <- file.path(output_way, "data/dds.RDS")
+
+merged_counts <- read.csv("merged_counts.csv", row.names = 2)
+merged_counts <- merged_counts [, -1]
+  
+
+  dds <- DESeqDataSetFromMatrix(
+    countData = merged_counts,
+    colData = metadata,
+    design = ~geno_type + location + geno_type:location 
+  )
+
+
+keep <- rowMeans(counts(dds)) > 100
+    dds <- dds[keep, ]
+    
+#vst <- vst(dds, blind=FALSE)
+
+dds <- DESeq(dds)
+saveRDS(dds, dds_file)
+```
+\newpage
+# Sample-level QC analysis 
+```{r include = FALSE}
+
+rld_file <- file.path(output_way, "data/rld.RDS")
+
+  rld <- vst(dds)   
+  saveRDS(rld, rld_file) 
+
+rld_mat <- assay(rld)
+```
+
+# PCA - geno_type
+```{r, fig.width = 10, fig.height = 5}
+plotPCA(rld, intgroup = c("geno_type")) + 
+  geom_label_repel(aes(label = name), box.padding = 0.35, point.padding = 0.5) + 
+  theme_bw()
+```
+
+# PCA - location 
+```{r, fig.width = 10, fig.height = 5}
+plotPCA(rld, intgroup = c("location")) + geom_label_repel(aes(label = name), box.padding = 0.35, point.padding = 0.5) + theme_bw()
+```
+
+# PCA - Sample_source_name 
+```{r, fig.width = 10, fig.height = 5}
+plotPCA(rld, intgroup = c("Sample_source_name")) + geom_label_repel(aes(label = name), box.padding = 0.35, point.padding = 0.5) + theme_bw()
+```
+
+
+# Clustering using top 1000 variable genes
+```{r, fig.width = 30, fig.height = 30}
+rv <- rowVars(rld_mat)
+rv <- order(rv, decreasing = TRUE) %>% head(1000)
+rld_mat_1000 <- rld_mat[rv,]
+annotation <- metadata[, c("geno_type", "location")]
+
+# Change colors
+rld_cor <- cor(rld_mat_1000)
+
+# Plot heatmap
+pheatmap(rld_cor, 
+         annotation = annotation, 
+         border = NA,
+         fontsize = 20)
+```
+
+# PCA: Controls
+```{r, fig.width = 10, wig.height = 10}
+rld.sub <- rld[ , rld$geno_type %in% c("genotype: control") ]
+plotPCA(rld.sub, intgroup = c("location")) + 
+  geom_label_repel(aes(label = name)) + 
+  theme_bw()
+
+```
+
+# PCA: Mutation
+```{r, fig.width = 10, fig.height = 5}
+rld.sub <- rld[ , rld$geno_type %in% c("genotype: A53T in SNCA")]
+plotPCA(rld.sub, intgroup = c("location")) + 
+  geom_label_repel(aes(label = name)) + 
+  theme_bw()
+
+```
+
+
+# PCA: Mutation
+```{r, fig.width = 10, fig.height = 5}
+rld.sub <- rld[ , rld$geno_type %in% c("genotype: A53T in SNCA")]
+plotPCA(rld.sub, intgroup = c("Sample_source_name")) + 
+  geom_label_repel(aes(label = name)) + 
+  theme_bw()
+```
+
+
+\newpage
+
+# DE geno_type all samples
+
+```{r}
+
+res <- results(dds, contrast = c("geno_type", "genotype: control", "genotype: A53T in SNCA"))
+
+res_down_all <- res %>% as.data.frame() %>% filter(padj < 0.05, log2FoldChange < -1 )
+res_down_all$ensembl_gene_id <- rownames(res_down_all)
+
+rownames(res_down_all) <- NULL
+res_down_all <- merge(res_down_all, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+res_down_all <- res_down_all %>%
+  select("external_gene_name", everything())
+res_down_all <- res_down_all[, -2] %>% arrange(log2FoldChange)
+
+
+
+res_up_all <- res %>% as.data.frame() %>% filter(padj < 0.05, log2FoldChange > 1)
+res_up_all$ensembl_gene_id <- rownames(res_up_all)
+
+rownames(res_up_all) <- NULL
+res_up_all <- merge(res_up_all, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+res_up_all <- res_up_all %>%
+  select("external_gene_name", everything())
+res_up_all <- res_up_all[, -2] %>% arrange(desc(log2FoldChange))
+
+
+res_down_all
+res_up_all
+
+output_file <- file.path(output_way, "res_up_all")
+write.csv(res_up_all, output_file)
+
+output_file <- file.path(output_way, "res_down_all")
+write.csv(res_down_all, output_file)
+```
+
+\newpage
+
+#Separation of transplanted samples and in vitro samples
+
+```{r}
+
+merged_counts_in_vitro <- merged_counts %>% select(c("in.vitro.Control1", "in.vitro.Control2", "in.vitro.Control3", "in.vitro.PD1", "in.vitro.PD2", "in.vitro.PD3"))
+merged_counts_transplanted <- merged_counts %>% select(c("transplanted.Control1", "transplanted.Control2", "transplanted.Control3", "transplanted.PD1", "transplanted.PD2", "transplanted.PD3"))
+
+
+metadata_in_vitro <- metadata %>% filter(rownames(.) %in% c("in.vitro.Control1", "in.vitro.Control2", "in.vitro.Control3", "in.vitro.PD1", "in.vitro.PD2", "in.vitro.PD3"))
+
+
+metadata_transplanted <- metadata %>% filter(rownames(.) %in% c("transplanted.Control1", "transplanted.Control2", "transplanted.Control3", "transplanted.PD1", "transplanted.PD2", "transplanted.PD3"))
+
+output_file <- file.path(output_way, "merged_counts_in_vitro.csv")
+write.csv(merged_counts_in_vitro, output_file)
+output_file <- file.path(output_way, "merged_counts_transplanted.csv")
+write.csv(merged_counts_transplanted, output_file)
+output_file <- file.path(output_way, "metadata_in_vitro.csv")
+write.csv(metadata_in_vitro, output_file)
+output_file <- file.path(output_way, "metadata_transplanted")
+write.csv(metadata_transplanted, output_file)
+
+```
+
+
+#Deseq 2 on subdataframes 
+
+```{r}
+
+dds_file_in_vitro <- file.path(output_way, "data/dds_in_vitro.RDS")
+dds_file_transplanted <- file.path(output_way, "data/dds_transplanted.RDS")
+
+
+  dds_in_vitro <- DESeqDataSetFromMatrix(
+    countData = merged_counts_in_vitro,
+    colData = metadata_in_vitro,
+    design = ~Sample_source_name+geno_type
+  )
+
+keep <- rowMeans(counts(dds_in_vitro)) > 100
+    dds_in_vitro <- dds_in_vitro[keep, ]
+
+    
+dds_in_vitro <- DESeq(dds_in_vitro)
+saveRDS(dds_in_vitro, dds_file_in_vitro)
+
+
+
+  dds_transplanted <- DESeqDataSetFromMatrix(
+    countData = merged_counts_transplanted,
+    colData = metadata_transplanted,
+    design = ~Sample_source_name+geno_type
+  )
+
+
+keep <- rowMeans(counts(dds_transplanted)) > 100
+    dds_transplanted <- dds_transplanted[keep, ]
+    
+dds_transplanted <- DESeq(dds_transplanted)
+saveRDS(dds_transplanted, dds_file_transplanted)
+```
+\newpage
+# DE in vitro
+
+```{r}
+
+res_in_vitro <- results(dds_in_vitro, contrast = c("geno_type", "genotype: A53T in SNCA", "genotype: control"))
+
+#up-regulated 
+res_in_vitro_up <- res_in_vitro %>% as.data.frame() %>% filter(pvalue < 0.05, log2FoldChange > 1.5 )
+res_in_vitro_up$ensembl_gene_id <- rownames(res_in_vitro_up)
+
+rownames(res_in_vitro_up) <- NULL
+res_in_vitro_up <- merge(res_in_vitro_up, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+res_in_vitro_up <- res_in_vitro_up %>%
+  select("external_gene_name", everything())
+res_in_vitro_up <- 
+  res_in_vitro_up[, -2] %>% 
+  arrange(desc(log2FoldChange))
+
+#down-regulated 
+res_in_vitro_down <- res_in_vitro %>% as.data.frame() %>% filter(pvalue < 0.05, log2FoldChange < -1.5 )
+res_in_vitro_down$ensembl_gene_id <- rownames(res_in_vitro_down)
+
+rownames(res_in_vitro_down) <- NULL
+res_in_vitro_down <- merge(res_in_vitro_down, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+res_in_vitro_down <- res_in_vitro_down %>%
+  select("external_gene_name", everything())
+res_in_vitro_down <- res_in_vitro_down[, -2] %>% arrange(log2FoldChange)
+
+
+res_in_vitro_up
+res_in_vitro_down
+
+output_file <- file.path(output_way, "res_in_vitro_up")
+write.csv(res_in_vitro_up, output_file)
+
+output_file <- file.path(output_way, "res_in_vitro_down")
+write.csv(res_in_vitro_down, output_file)
+```
+
+\newpage
+# DE tranplanted
+
+```{r}
+
+res_transplanted <- results(dds_transplanted, contrast = c("geno_type", "genotype: A53T in SNCA", "genotype: control"))
+
+#up-regulated
+res_transplanted_up <- res_transplanted %>% as.data.frame() %>% filter(pvalue < 0.05, log2FoldChange > 1.5)
+res_transplanted_up$ensembl_gene_id <- rownames(res_transplanted_up)
+
+rownames(res_transplanted_up) <- NULL
+res_transplanted_up <- merge(res_transplanted_up, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+res_transplanted_up <- res_transplanted_up %>%
+  select("external_gene_name", everything())
+res_transplanted_up <- res_transplanted_up[, -2] %>% arrange(desc(log2FoldChange))
+
+#down-regulated
+res_transplanted_down <- res_transplanted %>% as.data.frame() %>% filter(pvalue < 0.05, log2FoldChange < -1.5)
+
+res_transplanted_down$ensembl_gene_id <- rownames(res_transplanted_down)
+
+rownames(res_transplanted_down) <- NULL
+res_transplanted_down <- merge(res_transplanted_down, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+res_transplanted_down <- res_transplanted_down %>%
+  select("external_gene_name", everything())
+res_transplanted_down <- res_transplanted_down[, -2] %>% arrange(log2FoldChange)
+
+res_transplanted_up
+res_transplanted_down
+
+output_file <- file.path(output_way, "res_transplanted_up")
+write.csv(res_transplanted_up, output_file)
+
+output_file <- file.path(output_way, "res_transplanted_down")
+write.csv(res_transplanted_down, output_file)
+```
+
+\newpage
+#Visualization volcano plot
+
+```{r volcano, echo=FALSE, fig.height=4, fig.width=5}
+
+keyvals <- ifelse(de_results_in_vitro$log2FoldChange > 1.5, "red", 
+           ifelse(de_results_in_vitro$log2FoldChange < -1.5, "blue", "gray"))
+
+names(keyvals)[keyvals == 'red'] <- 'Up-regulated'
+names(keyvals)[keyvals == 'blue'] <- 'Down-regulated'
+
+EnhancedVolcano(de_results_in_vitro,
+                lab = de_results_in_vitro$external_gene_name,
+                x = "log2FoldChange",
+                y = "pvalue",
+                title = "in_vitro",
+                pCutoff = 0.01,
+                FCcutoff = 1.5,
+                ylim = c(0,5),
+                colCustom = keyvals) +
+  theme_minimal()
+
+
+keyvals_1 <- ifelse(de_results_transplanted$log2FoldChange > 1.5, "red", 
+           ifelse(de_results_transplanted$log2FoldChange < -1.5, "blue", "gray"))
+
+names(keyvals_1)[keyvals_1 == 'red'] <- 'Up-regulated'
+names(keyvals_1)[keyvals_1 == 'blue'] <- 'Down-regulated'
+
+EnhancedVolcano(de_results_transplanted,
+                lab = de_results_transplanted$external_gene_name,
+                x = "log2FoldChange",
+                y = "pvalue",
+                title = "Tranplanted",
+                pCutoff = 0.01,
+                FCcutoff = 1.5,
+                ylim = c(0,8),
+                colCustom = keyvals_1) +
+  theme_minimal()
+
+```
+
+\newpage
+#Functional analyze function
+
+```{r}
+plot_enrichr_results <- function(enrichr_results, pval_threshold = 0.05, top_n = 10, fill_column = "Combined.Score") {
+
+  filtered_results <- enrichr_results %>%
+    filter(Adjusted.P.value <= pval_threshold) %>%
+    arrange(Adjusted.P.value) %>%
+    head(top_n)
+  
+  p <- ggplot(filtered_results, aes(x = reorder(Term, -Adjusted.P.value), 
+                                    y = -log10(Adjusted.P.value), 
+                                    fill = !!sym(fill_column))) +
+    geom_bar(stat = "identity") +
+    scale_fill_gradient(low = "#00b1b1", high = "#9f0077") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Top Enrichment Terms",
+         x = "Enrichment Term",
+         y = "-log10(Adjusted P-value)",
+         fill = fill_column) +
+    theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          plot.title = element_text(size = 16, face = "bold"))
+  
+  print(p)
+}
+```
+
+\newpage
+#Functional analyze in_vitro
+
+```{r, fig.width = 30, fig.height = 5}
+de_results_in_vitro_up <- read.csv("res_in_vitro_up")
+de_results_in_vitro_down <- read.csv("res_in_vitro_down")
+
+de_results_in_vitro <- rbind(de_results_in_vitro_up, de_results_in_vitro_down) 
+
+dbs <- c("Reactome_2016", "GO_Biological_Process_2021", "GWAS_Catalog_2019")
+
+enriched <- enrichr(de_results_in_vitro[, 2], dbs)
+
+#enriched$Reactome_2016 %>% filter(Adjusted.P.value<0.1)
+
+plot_enrichr_results(enriched$GO_Biological_Process_2021)
+plot_enrichr_results(enriched$GWAS_Catalog_2019)
+#plot_enrichr_results(enriched$Reactome_2016)
+
+```
+
+```{r, fig.width = 30, fig.height = 5}
+wp_example <- enriched$GO_Biological_Process_2021
+
+wp_example$OverlapPercentage <- sapply(strsplit(wp_example$Overlap, "/"), function(x) {
+  round(as.numeric(x[1]) / as.numeric(x[2]) * 100, 2)
+})
+
+plot_enrichr_results(wp_example, fill_column = "OverlapPercentage")
+
+```
+
+
+```{r, fig.width = 30, fig.height = 5}
+gostres <- gost(query = de_results_in_vitro[, 2], organism = "hsapiens",
+                                ordered_query = TRUE)
+
+p <- gostplot(gostres, capped = FALSE, interactive = FALSE)
+p
+```
+
+```{r}
+
+res_in_vitro <- res_in_vitro %>% as.data.frame()
+
+res_in_vitro$ensembl_gene_id <- rownames(res_in_vitro)
+
+rownames(res_in_vitro) <- NULL
+res_in_vitro <- merge(res_in_vitro, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE) 
+
+res_in_vitro <- res_in_vitro[!duplicated(res_in_vitro$external_gene_name), ]
+
+res_in_vitro <- res_in_vitro %>% filter(pvalue<0.05)
+
+ranked_genes <- res_in_vitro %>%
+  dplyr::filter(!is.na(stat)) %>% 
+  dplyr::arrange(desc(stat)) %>%
+  dplyr::select(external_gene_name, stat)
+
+
+
+hallmark_pathways <- gmtPathways("h.all.v2023.1.Hs.symbols.gmt")
+curated_pathways <- gmtPathways("c2.all.v2023.1.Hs.symbols.gmt")
+
+stats <- ranked_genes$stat
+names(stats) <- ranked_genes$external_gene_name
+
+fgsea_res_hallmark <- fgsea(pathways = hallmark_pathways,
+                            stats = stats, 
+                            minSize = 30, maxSize = 500, nproc = 1)
+
+fgsea_res_hallmark %>% filter (padj<0.05)
+
+
+fgsea_res_curated_pathways <- fgsea(pathways = curated_pathways,
+                            stats = stats, 
+                            minSize = 0, maxSize = 500, nproc = 1)
+
+fgsea_res_curated_pathways %>% filter (padj<0.05) %>% arrange (padj)
+
+plotEnrichment(hallmark_pathways[["HALLMARK_MTORC1_SIGNALING"]], stats)
+
+plotEnrichment(curated_pathways[["REACTOME_CELL_CYCLE_MITOTIC"]], stats)
+```
+
+#Ranking-based enrichement
+```{r}
+de_results <- res_in_vitro %>% as.data.frame()
+
+de_results$ensembl_gene_id <- rownames(de_results)
+
+rownames(de_results) <- NULL
+
+de_results <- merge(de_results, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+
+de_results <- de_results [, -1] %>%
+  select("external_gene_name", everything())
+
+de_results <- de_results[!duplicated(de_results[, 1]), ]
+
+rownames(de_results) <- de_results[, 1]
+
+de_results <- de_results[, -1]
+
+
+```
+
+
+```{r}
+gene_entrez <- getBM(filters = "external_gene_name",
+             attributes = c("external_gene_name", "entrezgene_id"),
+             values = rownames(de_results),
+             mart = mart)
+gene_entrez
+```
+
+```{r}
+de_results <- de_results %>% tibble::rownames_to_column("genes")
+
+
+de_results <- dplyr::left_join(de_results, gene_entrez, by = c("genes" = "external_gene_name"))
+
+
+
+de_results <- de_results %>% 
+  mutate(ranking = (sign(log2FoldChange) * (-log10(pvalue))))
+
+de_results <- de_results %>% 
+  tidyr::drop_na()
+
+
+```
+
+
+```{r}
+gene_list <- de_results$ranking
+names(gene_list) <- de_results$entrezgene_id
+gene_list = sort(gene_list, decreasing = TRUE)
+```
+
+```{r}
+gseWP_res_025 <- gseGO(gene_list, OrgDb = org.Hs.eg.db,
+                       ont = "CC",
+              minGSSize    = 100,
+              maxGSSize    = 500,
+              pvalueCutoff = 0.05,
+              verbose      = FALSE)
+gseWP_res_005 <- gseWP_res_025@result %>% filter(p.adjust < 0.05)
+
+```
+
+```{r, fig.width = 15, fig.height = 20}
+dotplot(gseWP_res_025, showCategory = 30) + ggtitle("dotplot for GSEA vs gseGO in_vitro (Padj < 0.05")
+
+dotplot(gseWP_res_025, showCategory = 30, x = "NES") + ggtitle("dotplot for GSEA vs gseGO in_vitro (Padj < 0.05")
+
+gseWP_res_025@result
+
+```
+
+
+
+
+
+\newpage
+#Functional analyze transplanted
+
+```{r, fig.width = 30, fig.height = 5}
+de_results_transplanted_up <- read.csv("res_transplanted_up")
+de_results_transplanted_down <- read.csv("res_transplanted_down")
+
+de_results_transplanted <- rbind(de_results_transplanted_up, de_results_transplanted_down) 
+
+
+dbs <- c("Reactome_2016", "GO_Biological_Process_2021", "GWAS_Catalog_2019")
+
+enriched <- enrichr(de_results_transplanted[, 2], dbs)
+
+
+enriched$Reactome_2016 %>% filter(Adjusted.P.value<0.1)
+plot_enrichr_results(enriched$Reactome_2016)
+plot_enrichr_results(enriched$GO_Biological_Process_2021)
+
+```
+
+
+```{r, fig.width = 30, fig.height = 5}
+gostres <- gost(query = de_results_transplanted[, 2], organism = "hsapiens",
+                                ordered_query = TRUE)
+
+p <- gostplot(gostres, capped = FALSE, interactive = FALSE)
+p
+```
+
+
+\newpage 
+#Ranking-based enrichement
+```{r}
+de_results <- res_transplanted %>% as.data.frame()
+
+de_results$ensembl_gene_id <- rownames(de_results)
+
+rownames(de_results) <- NULL
+
+de_results <- merge(de_results, gene_info[, c("ensembl_gene_id", "external_gene_name")], 
+                                by = "ensembl_gene_id", all.x = TRUE)
+
+de_results <- de_results [, -1] %>%
+  select("external_gene_name", everything())
+
+de_results <- de_results[!duplicated(de_results[, 1]), ]
+
+rownames(de_results) <- de_results[, 1]
+
+de_results <- de_results[, -1]
+
+
+```
+
+
+```{r}
+gene_entrez <- getBM(filters = "external_gene_name",
+             attributes = c("external_gene_name", "entrezgene_id"),
+             values = rownames(de_results),
+             mart = mart)
+gene_entrez
+```
+
+```{r}
+de_results <- de_results %>% tibble::rownames_to_column("genes")
+
+
+de_results <- dplyr::left_join(de_results, gene_entrez, by = c("genes" = "external_gene_name"))
+
+
+
+de_results <- de_results %>% 
+  mutate(ranking = (sign(log2FoldChange) * (-log10(pvalue))))
+
+de_results <- de_results %>% 
+  tidyr::drop_na()
+
+
+```
+
+
+```{r}
+gene_list <- de_results$ranking
+names(gene_list) <- de_results$entrezgene_id
+gene_list = sort(gene_list, decreasing = TRUE)
+```
+
+```{r}
+gseWP_res_025 <- gseGO(gene_list, OrgDb = org.Hs.eg.db,
+                       ont = "CC",
+              minGSSize    = 100,
+              maxGSSize    = 500,
+              pvalueCutoff = 0.05,
+              verbose      = FALSE)
+gseWP_res_005 <- gseWP_res_025@result %>% filter(p.adjust < 0.05)
+
+```
+
+```{r, fig.width = 8, fig.height = 10}
+dotplot(gseWP_res_025, showCategory = 30) + ggtitle("dotplot for GSEA vs gseGO (Padj < 0.25")
+
+dotplot(gseWP_res_025, showCategory = 30, x = "NES") + ggtitle("dotplot for GSEA vs gseGO (Padj < 0.25")
+
+gseWP_res_025@result
+
+```
